@@ -1,0 +1,1 @@
+horovodrun -np 1 -H localhost:1 python /workspace/hipress_mxnet.py --batch-size 16 --num-epochs 1 --log-interval 20 --model vgg19

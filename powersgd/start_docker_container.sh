@@ -1,0 +1,1 @@
+docker run --name wuhao_hipress_upgrade --gpus all --network=host --ipc=host --security-opt seccomp=unconfined -v /home/mark/sparse_adam:/workspace -v /data:/data -it wuhao_hipress_upgrade_image /bin/bash
