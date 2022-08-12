@@ -1,0 +1,1 @@
+NCCL_DEBUG=INFO NCCL_TREE_THRESHOLD=0 NCCL_IB_DISABLE=1 NCCL_SOCKET_IFNAME=ens11f0 horovodrun -np 2 -H localhost:2 python /workspace/hipress_pytorch_lstm.py --batch_size 80 --epochs 1 --threshold 0 --num-iterations 200 --partition-threshold 4194304 --algorithm powersgd

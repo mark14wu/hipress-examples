@@ -4,30 +4,12 @@ import math
 import numpy as np
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 import horovod.torch as hvd
 
 from collections import defaultdict
 from torch.autograd import Variable
 
-
-def embedded_dropout(embed, words, dropout=0.1, scale=None):
-  if dropout:
-    mask = embed.weight.data.new().resize_((embed.weight.size(0), 1)).bernoulli_(1 - dropout).expand_as(embed.weight) / (1 - dropout)
-    masked_embed_weight = mask * embed.weight
-  else:
-    masked_embed_weight = embed.weight
-  if scale:
-    masked_embed_weight = scale.expand_as(masked_embed_weight) * masked_embed_weight
-
-  padding_idx = embed.padding_idx
-  if padding_idx is None:
-      padding_idx = -1
-
-  X = torch.nn.functional.embedding(words, masked_embed_weight,
-    padding_idx, embed.max_norm, embed.norm_type,
-    embed.scale_grad_by_freq, embed.sparse
-  )
-  return X
 
 class LockedDropout(nn.Module):
     def __init__(self):
@@ -250,30 +232,20 @@ class SplitCrossEntropyLoss(nn.Module):
 class RNNModel(nn.Module):
     """Container module with an encoder, a recurrent module, and a decoder."""
 
-    def __init__(self, rnn_type, ntoken, ninp, nhid, nlayers, dropout=0.5, dropouth=0.5, dropouti=0.5, dropoute=0.1, wdrop=0, tie_weights=False):
+    def __init__(self, rnn_type, ntoken, ninp, nhid, nlayers, dropout=0.5, tie_weights=False):
         super(RNNModel, self).__init__()
-        self.lockdrop = LockedDropout()
-        self.idrop = nn.Dropout(dropouti)
-        self.hdrop = nn.Dropout(dropouth)
+        self.ntoken = ntoken
         self.drop = nn.Dropout(dropout)
-        self.training = True
         self.encoder = nn.Embedding(ntoken, ninp)
-        assert rnn_type in ['LSTM', 'QRNN', 'GRU'], 'RNN type is not supported'
-        if rnn_type == 'LSTM':
-            self.rnns = [torch.nn.LSTM(ninp if l == 0 else nhid, nhid if l != nlayers - 1 else (ninp if tie_weights else nhid), 1, dropout=0) for l in range(nlayers)]
-            if wdrop:
-                self.rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in self.rnns]
-        if rnn_type == 'GRU':
-            self.rnns = [torch.nn.GRU(ninp if l == 0 else nhid, nhid if l != nlayers - 1 else ninp, 1, dropout=0) for l in range(nlayers)]
-            if wdrop:
-                self.rnns = [WeightDrop(rnn, ['weight_hh_l0'], dropout=wdrop) for rnn in self.rnns]
-        elif rnn_type == 'QRNN':
-            from torchqrnn import QRNNLayer
-            self.rnns = [QRNNLayer(input_size=ninp if l == 0 else nhid, hidden_size=nhid if l != nlayers - 1 else (ninp if tie_weights else nhid), save_prev_x=True, zoneout=0, window=2 if l == 0 else 1, output_gate=True) for l in range(nlayers)]
-            for rnn in self.rnns:
-                rnn.linear = WeightDrop(rnn.linear, ['weight'], dropout=wdrop)
-        print(self.rnns)
-        self.rnns = torch.nn.ModuleList(self.rnns)
+        if rnn_type in ['LSTM', 'GRU']:
+            self.rnn = getattr(nn, rnn_type)(ninp, nhid, nlayers, dropout=dropout)
+        else:
+            try:
+                nonlinearity = {'RNN_TANH': 'tanh', 'RNN_RELU': 'relu'}[rnn_type]
+            except KeyError:
+                raise ValueError( """An invalid option for `--model` was supplied,
+                                 options are ['LSTM', 'GRU', 'RNN_TANH' or 'RNN_RELU']""")
+            self.rnn = nn.RNN(ninp, nhid, nlayers, nonlinearity=nonlinearity, dropout=dropout)
         self.decoder = nn.Linear(nhid, ntoken)
 
         # Optionally tie weights as in:
@@ -283,70 +255,37 @@ class RNNModel(nn.Module):
         # "Tying Word Vectors and Word Classifiers: A Loss Framework for Language Modeling" (Inan et al. 2016)
         # https://arxiv.org/abs/1611.01462
         if tie_weights:
-            #if nhid != ninp:
-            #    raise ValueError('When using the tied flag, nhid must be equal to emsize')
+            if nhid != ninp:
+                raise ValueError('When using the tied flag, nhid must be equal to emsize')
             self.decoder.weight = self.encoder.weight
 
         self.init_weights()
 
         self.rnn_type = rnn_type
-        self.ninp = ninp
         self.nhid = nhid
         self.nlayers = nlayers
-        self.dropout = dropout
-        self.dropouti = dropouti
-        self.dropouth = dropouth
-        self.dropoute = dropoute
-        self.tie_weights = tie_weights
-
-    def reset(self):
-        if self.rnn_type == 'QRNN': [r.reset() for r in self.rnns]
 
     def init_weights(self):
         initrange = 0.1
-        self.encoder.weight.data.uniform_(-initrange, initrange)
-        self.decoder.bias.data.fill_(0)
-        self.decoder.weight.data.uniform_(-initrange, initrange)
+        nn.init.uniform_(self.encoder.weight, -initrange, initrange)
+        nn.init.zeros_(self.decoder.bias)
+        nn.init.uniform_(self.decoder.weight, -initrange, initrange)
 
-    def forward(self, input, hidden, return_h=False):
-        emb = embedded_dropout(self.encoder, input, dropout=self.dropoute if self.training else 0)
-        #emb = self.idrop(emb)
-
-        emb = self.lockdrop(emb, self.dropouti)
-
-        raw_output = emb
-        new_hidden = []
-        #raw_output, hidden = self.rnn(emb, hidden)
-        raw_outputs = []
-        outputs = []
-        for l, rnn in enumerate(self.rnns):
-            current_input = raw_output
-            raw_output, new_h = rnn(raw_output, hidden[l])
-            new_hidden.append(new_h)
-            raw_outputs.append(raw_output)
-            if l != self.nlayers - 1:
-                #self.hdrop(raw_output)
-                raw_output = self.lockdrop(raw_output, self.dropouth)
-                outputs.append(raw_output)
-        hidden = new_hidden
-
-        output = self.lockdrop(raw_output, self.dropout)
-        outputs.append(output)
-
-        result = output.view(output.size(0)*output.size(1), output.size(2))
-        if return_h:
-            return result, hidden, raw_outputs, outputs
-        return result, hidden
+    def forward(self, input, hidden):
+        emb = self.drop(self.encoder(input))
+        output, hidden = self.rnn(emb, hidden)
+        output = self.drop(output)
+        decoded = self.decoder(output)
+        decoded = decoded.view(-1, self.ntoken)
+        return F.log_softmax(decoded, dim=1), hidden
 
     def init_hidden(self, bsz):
-        weight = next(self.parameters()).data
+        weight = next(self.parameters())
         if self.rnn_type == 'LSTM':
-            return [(weight.new(1, bsz, self.nhid if l != self.nlayers - 1 else (self.ninp if self.tie_weights else self.nhid)).zero_(),
-                    weight.new(1, bsz, self.nhid if l != self.nlayers - 1 else (self.ninp if self.tie_weights else self.nhid)).zero_())
-                    for l in range(self.nlayers)]
-        elif self.rnn_type == 'QRNN' or self.rnn_type == 'GRU':
-            return [weight.new(1, bsz, self.nhid if l != self.nlayers - 1 else (self.ninp if self.tie_weights else self.nhid)).zero_()
-                    for l in range(self.nlayers)]
+            return (weight.new_zeros(self.nlayers, bsz, self.nhid),
+                    weight.new_zeros(self.nlayers, bsz, self.nhid))
+        else:
+            return weight.new_zeros(self.nlayers, bsz, self.nhid)
 
 def repackage_hidden(h):
     """Wraps hidden states in new Tensors,
@@ -368,22 +307,20 @@ def batchify(data, bsz, args):
         data = data.cuda()
     return data
 
-
-def get_batch(source, i, args, seq_len=None, evaluation=False):
-    if use_synthetic_data:
-        seq_len = seq_len if seq_len else args.bptt
+def get_batch(source, i):
+    if USING_SYNTHETIC_DATA:
+        seq_len = args.bptt
     else:
-        seq_len = min(seq_len if seq_len else args.bptt, len(source) - 1 - i)
+        seq_len = min(args.bptt, len(source) - 1 - i)
     data = source[i:i+seq_len]
     target = source[i+1:i+1+seq_len].view(-1)
     return data, target
 
 class SyntheticDataLoader:
     def __init__(self, batch_size, max_iter, rank):
-        embedding_size = synthetic_embedding_size
         self.cur_iter = 0
         self.max_iter = max_iter
-        data = np.random.randint(0, embedding_size, [batch_size, ])
+        data = np.random.randint(0, SYNTHETIC_NTOKEN, [batch_size, ])
         self.data = torch.from_numpy(data).to(rank)
         self.data_cache = dict()
     
@@ -426,12 +363,6 @@ parser.add_argument('--bptt', type=int, default=70,
                     help='sequence length')
 parser.add_argument('--dropout', type=float, default=0.65,
                     help='dropout applied to layers (0 = no dropout)')
-parser.add_argument('--dropouth', type=float, default=0.,
-                    help='dropout for rnn layers (0 = no dropout)')
-parser.add_argument('--dropouti', type=float, default=0.,
-                    help='dropout for input embedding layers (0 = no dropout)')
-parser.add_argument('--dropoute', type=float, default=0.,
-                    help='dropout to remove words from embedding layer (0 = no dropout)')
 parser.add_argument('--wdrop', type=float, default=0.,
                     help='amount of weight dropout to apply to the RNN hidden to hidden matrix')
 parser.add_argument('--seed', type=int, default=1111,
@@ -442,14 +373,8 @@ parser.add_argument('--cuda', action='store_false',
                     help='use CUDA')
 parser.add_argument('--log-interval', type=int, default=20, metavar='N',
                     help='report interval')
-parser.add_argument('--alpha', type=float, default=2,
-                    help='alpha L2 regularization on RNN activation (alpha = 0 means no regularization)')
-parser.add_argument('--beta', type=float, default=1,
-                    help='beta slowness regularization applied on RNN activiation (beta = 0 means no regularization)')
 parser.add_argument('--wdecay', type=float, default=1.2e-6,
                     help='weight decay applied to all weights')
-parser.add_argument('--resume', type=str,  default='',
-                    help='path of model to resume')
 parser.add_argument('--optimizer', type=str,  default='sgd',
                     help='optimizer to use (sgd, adam)')
 parser.add_argument('--when', nargs="+", type=int, default=[-1],
@@ -479,8 +404,8 @@ if torch.cuda.is_available():
         print("GPU index:", hvd.local_rank())
         torch.cuda.set_device(hvd.local_rank())
 
-use_synthetic_data = True
-synthetic_embedding_size = 1000
+USING_SYNTHETIC_DATA = True
+SYNTHETIC_NTOKEN = 33278
 
 ###############################################################################
 # Load data
@@ -494,20 +419,18 @@ fn = 'corpus.{}.data'.format(hashlib.md5(args.data.encode()).hexdigest())
 eval_batch_size = 10
 test_batch_size = 1
 
-if use_synthetic_data:
+if USING_SYNTHETIC_DATA:
     train_data = SyntheticDataLoader(args.batch_size, args.num_iterations, hvd.local_rank())
 else:
+    raise NotImplementedError("data loader not implemented!")
     if os.path.exists(fn):
         print('Loading cached dataset...')
         corpus = torch.load(fn)
     else:
-        raise NotImplementedError("data loader not implemented!")
         import data
         print('Producing dataset...')
         corpus = data.Corpus(args.data)
         torch.save(corpus, fn)
-
-
     train_data = batchify(corpus.train, args.batch_size, args)
 
 
@@ -516,25 +439,15 @@ else:
 ###############################################################################
 
 
-criterion = None
+criterion = nn.NLLLoss()
+# criterion = None
 
-if use_synthetic_data:
-    ntokens = synthetic_embedding_size
+if USING_SYNTHETIC_DATA:
+    ntokens = SYNTHETIC_NTOKEN
 else:
     ntokens = len(corpus.dictionary)
 print("ntokens:",ntokens)
-model = RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout, args.dropouth, args.dropouti, args.dropoute, args.wdrop, args.tied)
-###
-if args.resume:
-    print('Resuming model ...')
-    model_load(args.resume)
-    optimizer.param_groups[0]['lr'] = args.lr
-    model.dropouti, model.dropouth, model.dropout, args.dropoute = args.dropouti, args.dropouth, args.dropout, args.dropoute
-    if args.wdrop:
-        from weight_drop import WeightDrop
-        for rnn in model.rnns:
-            if type(rnn) == WeightDrop: rnn.dropout = args.wdrop
-            elif rnn.zoneout > 0: rnn.zoneout = args.wdrop
+model = RNNModel(args.model, ntokens, args.emsize, args.nhid, args.nlayers, args.dropout)
 ###
 if not criterion:
     splits = []
@@ -567,46 +480,30 @@ print(model)
 def train():
     # Turn on training mode which enables dropout.
     if args.model == 'QRNN': model.reset()
-    total_loss = 0
-    start_time = time.time()
     # ntokens = len(corpus.dictionary)
     hidden = model.init_hidden(args.batch_size)
     
     average_start = time.time()
     batch, i = 0, 0
     epoch_begin = time.time()
-    # while use_synthetic_data and batch < args.num_iterations or i < train_data.size(0) - 1 - 1:
+
+    model.train()
     while True:
-        if use_synthetic_data:
+        if USING_SYNTHETIC_DATA:
             if batch >= args.num_iterations:
                 break
         else:
             if i >= train_data.size(0) - 1 - 1:
                 break
-        bptt = args.bptt if np.random.random() < 0.95 else args.bptt / 2.
-        # Prevent excessively small or negative sequence lengths
-        seq_len = max(5, int(np.random.normal(bptt, 5)))
-        # There's a very small chance that it could select a very long sequence length resulting in OOM
-        # seq_len = min(seq_len, args.bptt + 10)
-
-        lr2 = optimizer.param_groups[0]['lr']
-        optimizer.param_groups[0]['lr'] = lr2 * seq_len / args.bptt
-        model.train()
-        data, targets = get_batch(train_data, i, args, seq_len=seq_len)
-
+        
+        data, targets = get_batch(train_data, i)
+        model.zero_grad()
         # Starting each batch, we detach the hidden state from how it was previously produced.
         # If we didn't, the model would try backpropagating all the way to start of the dataset.
         hidden = repackage_hidden(hidden)
-        optimizer.zero_grad()
+        output, hidden = model(data, hidden)
 
-        output, hidden, rnn_hs, dropped_rnn_hs = model(data, hidden, return_h=True)
-        raw_loss = criterion(model.decoder.weight, model.decoder.bias, output, targets)
-
-        loss = raw_loss
-        # Activiation Regularization
-        if args.alpha: loss = loss + sum(args.alpha * dropped_rnn_h.pow(2).mean() for dropped_rnn_h in dropped_rnn_hs[-1:])
-        # Temporal Activation Regularization (slowness)
-        if args.beta: loss = loss + sum(args.beta * (rnn_h[1:] - rnn_h[:-1]).pow(2).mean() for rnn_h in rnn_hs[-1:])
+        loss = criterion(output, targets)
         loss.backward()
 
         # `clip_grad_norm` helps prevent the exploding gradient problem in RNNs / LSTMs.
@@ -618,19 +515,6 @@ def train():
         else:
             optimizer.step()
             
-        total_loss += raw_loss.data
-        optimizer.param_groups[0]['lr'] = lr2
-        '''
-        if batch % args.log_interval == 0 and batch > 0:
-            cur_loss = total_loss.item() / args.log_interval
-            elapsed = time.time() - start_time
-            print('| epoch {:3d} | {:5d}/{:5d} batches | lr {:05.5f} | ms/batch {:5.2f} | '
-                    'loss {:5.2f} | ppl {:8.2f} | bpc {:8.3f}'.format(
-                epoch, batch, len(train_data) // args.bptt, optimizer.param_groups[0]['lr'],
-                elapsed * 1000 / args.log_interval, cur_loss, math.exp(cur_loss), cur_loss / math.log(2)))
-            total_loss = 0
-            start_time = time.time()
-        '''
         if (batch + 1) % args.log_interval == 0:
             average_end = time.time()
             average_speed = hvd.size() * args.batch_size * args.log_interval / (average_end - average_start)
@@ -640,9 +524,10 @@ def train():
             
         ###
         batch += 1
-        i += seq_len
+        i += args.bptt
     epoch_end = time.time()
-    print("Epoch Average Speed: {:.2f} samples/sec".format(batch * args.batch_size * hvd.size() / (epoch_end - epoch_begin)))
+    if hvd.rank() == 0:
+        print("Epoch Average Speed: {:.2f} samples/sec".format(batch * args.batch_size * hvd.size() / (epoch_end - epoch_begin)))
         
         
 # Loop over epochs.

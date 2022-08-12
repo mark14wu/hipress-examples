@@ -1,0 +1,1 @@
+torchrun --standalone --nnodes=1 --nproc_per_node=1 /workspace/torchddp_lstm.py --batch-size 80 --num-epochs 1 --log-interval 20
