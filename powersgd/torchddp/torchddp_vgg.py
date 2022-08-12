@@ -84,9 +84,8 @@ def main():
         matrix_approximation_rank=low_rank,
         use_error_feedback=True,
         warm_start=False,
-        batch_tensors_with_same_shape=False,
         start_powerSGD_iter=10)
-    model.register_comm_hook(state, powerSGD_hook)
+    # model.register_comm_hook(state, powerSGD_hook)
 
     loss_fn = nn.CrossEntropyLoss()
 

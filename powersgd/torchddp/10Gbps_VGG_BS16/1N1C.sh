@@ -1,0 +1,1 @@
+torchrun --standalone --nnodes=1 --nproc_per_node=2 /workspace/torchddp_vgg.py --batch-size 16 --num-epochs 1 --log-interval 20 --model vgg19
