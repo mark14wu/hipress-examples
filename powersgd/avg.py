@@ -5,6 +5,7 @@ while True:
         if line == '':
             if speeds:
                 print("Average Speed: {:.2f}".format(sum(speeds) / len(speeds)))
+                print("Average Speed: {:.4f}".format(sum(speeds) / len(speeds)))
                 speeds = []
             continue
         start_index = line.find("Speed:")

@@ -1,0 +1,1 @@
+torchrun --standalone --nnodes=1 --nproc_per_node=2 /workspace/hipress-examples/powersgd/torchddp/torchddp_ugatit/main.py --dataset selfie2anime --dataset_dir /data/trainData/ --light True --batch_size 1
