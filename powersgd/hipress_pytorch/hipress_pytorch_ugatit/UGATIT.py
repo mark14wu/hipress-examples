@@ -12,6 +12,22 @@ if os.getenv("DISTRIBUTED_FRAMEWORK") == "byteps":
 elif os.getenv("DISTRIBUTED_FRAMEWORK") == "horovod":
     import horovod.torch as bps
 
+USING_SYNTHETIC_DATA = True
+
+class SyntheticDataLoader:
+    def __init__(self):
+        self.data = torch.randn([1, 3, 256, 256])
+        self.trash = torch.randn([1])
+
+    def __iter__(self):
+        return self
+
+    def __next__(self):
+        return self.data, self.trash
+
+    def next(self):
+        return self.__next__()
+
 class UGATIT(object) :
     def __init__(self, args):
         self.light = args.light
@@ -52,7 +68,7 @@ class UGATIT(object) :
         self.img_size = args.img_size
         self.img_ch = args.img_ch
 
-        self.device = args.device
+        self.device = bps.local_rank()
         self.benchmark_flag = args.benchmark_flag
         self.resume = args.resume
         self.fix_aug = args.fix_aug
@@ -122,25 +138,31 @@ class UGATIT(object) :
             transforms.ToTensor(),
             transforms.Normalize(mean=(0.5, 0.5, 0.5), std=(0.5, 0.5, 0.5))
         ])
-
-        self.trainA = ImageFolder(os.path.join(self.dataset_dir, self.dataset, 'trainA'), train_transform, list_mode=self.list_mode)
-        self.trainB = ImageFolder(os.path.join(self.dataset_dir, self.dataset, 'trainB'), train_transform, list_mode=self.list_mode)
-        self.testA = ImageFolder(os.path.join(self.dataset_dir, self.dataset, 'testA'), test_transform, list_mode=self.list_mode)
-        self.testB = ImageFolder(os.path.join(self.dataset_dir, self.dataset, 'testB'), test_transform, list_mode=self.list_mode)
+        if USING_SYNTHETIC_DATA:
+            print("using synthetic data!")
+            self.trainA_loader = SyntheticDataLoader()
+            self.trainB_loader = SyntheticDataLoader()
+            self.testA_loader = SyntheticDataLoader()
+            self.testB_loader = SyntheticDataLoader()
+        else:
+            self.trainA = ImageFolder(os.path.join(self.dataset_dir, self.dataset, 'trainA'), train_transform, list_mode=self.list_mode)
+            self.trainB = ImageFolder(os.path.join(self.dataset_dir, self.dataset, 'trainB'), train_transform, list_mode=self.list_mode)
+            self.testA = ImageFolder(os.path.join(self.dataset_dir, self.dataset, 'testA'), test_transform, list_mode=self.list_mode)
+            self.testB = ImageFolder(os.path.join(self.dataset_dir, self.dataset, 'testB'), test_transform, list_mode=self.list_mode)
         
-        trainA_sampler = torch.utils.data.distributed.DistributedSampler(
-            self.trainA, num_replicas=bps.size(), rank=bps.rank())
-        trainB_sampler = torch.utils.data.distributed.DistributedSampler(
-            self.trainB, num_replicas=bps.size(), rank=bps.rank())
-        testA_sampler = torch.utils.data.distributed.DistributedSampler(
-            self.testA, num_replicas=bps.size(), rank=bps.rank())
-        testB_sampler = torch.utils.data.distributed.DistributedSampler(
-            self.testB, num_replicas=bps.size(), rank=bps.rank())
+            trainA_sampler = torch.utils.data.distributed.DistributedSampler(
+                self.trainA, num_replicas=bps.size(), rank=bps.rank())
+            trainB_sampler = torch.utils.data.distributed.DistributedSampler(
+                self.trainB, num_replicas=bps.size(), rank=bps.rank())
+            testA_sampler = torch.utils.data.distributed.DistributedSampler(
+                self.testA, num_replicas=bps.size(), rank=bps.rank())
+            testB_sampler = torch.utils.data.distributed.DistributedSampler(
+                self.testB, num_replicas=bps.size(), rank=bps.rank())
 
-        self.trainA_loader = DataLoader(self.trainA, batch_size=self.batch_size, sampler=trainA_sampler, num_workers=1)
-        self.trainB_loader = DataLoader(self.trainB, batch_size=self.batch_size, sampler=trainB_sampler, num_workers=1)
-        self.testA_loader = DataLoader(self.testA, batch_size=1, sampler=testA_sampler)
-        self.testB_loader = DataLoader(self.testB, batch_size=1, sampler=testB_sampler)
+            self.trainA_loader = DataLoader(self.trainA, batch_size=self.batch_size, sampler=trainA_sampler, num_workers=1)
+            self.trainB_loader = DataLoader(self.trainB, batch_size=self.batch_size, sampler=trainB_sampler, num_workers=1)
+            self.testA_loader = DataLoader(self.testA, batch_size=1, sampler=testA_sampler)
+            self.testB_loader = DataLoader(self.testB, batch_size=1, sampler=testB_sampler)            
 
         """ Define Generator, Discriminator """
         self.genA2B = ResnetGenerator(input_nc=3, output_nc=3, ngf=self.ch, n_blocks=self.n_res, img_size=self.img_size, light=self.light).to(self.device)
@@ -175,10 +197,12 @@ class UGATIT(object) :
                                      [("disLA."+k, v) for k, v in self.disLA.state_dict().items()] + 
                                      [("disLB."+k, v) for k, v in self.disLB.state_dict().items()])
         
+        print("broadcast parameters!")
         bps.broadcast_parameters(gen_state_dict, root_rank=0)
         bps.broadcast_parameters(dis_state_dict, root_rank=0)
 
         """ Trainer """
+        print("init optimizers!")
         self.G_optim = torch.optim.Adam(itertools.chain(self.genA2B.parameters(), self.genB2A.parameters()), 
                                         lr=self.lr,
                                         betas=(0.5, 0.999),
