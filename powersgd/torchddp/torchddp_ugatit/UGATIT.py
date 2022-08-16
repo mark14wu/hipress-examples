@@ -15,6 +15,8 @@ local_rank = int(os.environ["LOCAL_RANK"])
 world_size = int(os.environ["WORLD_SIZE"])
 rank = int(os.environ["RANK"])
 
+print("rank: %d, local_rank: %d" % (rank, local_rank))
+
 LOW_RANK = 1
 
 USING_SYNTHETIC_DATA = True
@@ -35,6 +37,66 @@ class SyntheticDataLoader:
 
 def ddp_wrapper(model):
     return torch.nn.parallel.DistributedDataParallel(model, device_ids=[local_rank], output_device=local_rank)
+
+class UGATITModule(nn.Module):
+    def __init__(self, genA2B, genB2A, disGA, disGB, disLA, disLB):
+        super().__init__()
+        self.genA2B = genA2B
+        self.genB2A = genB2A
+        self.disGA = disGA
+        self.disGB = disGB
+        self.disLA = disLA
+        self.disLB = disLB
+
+    def forward(self, real_A, real_B, update):
+        # update D
+        if update == 'D':
+            fake_A2B, _, _ = self.genA2B(real_A)
+            fake_B2A, _, _ = self.genB2A(real_B)
+
+            real_GA_logit, real_GA_cam_logit, _ = self.disGA(real_A)
+            real_LA_logit, real_LA_cam_logit, _ = self.disLA(real_A)
+            real_GB_logit, real_GB_cam_logit, _ = self.disGB(real_B)
+            real_LB_logit, real_LB_cam_logit, _ = self.disLB(real_B)
+
+            fake_GA_logit, fake_GA_cam_logit, _ = self.disGA(fake_B2A)
+            fake_LA_logit, fake_LA_cam_logit, _ = self.disLA(fake_B2A)
+            fake_GB_logit, fake_GB_cam_logit, _ = self.disGB(fake_A2B)
+            fake_LB_logit, fake_LB_cam_logit, _ = self.disLB(fake_A2B)
+
+            return real_GA_logit, real_GA_cam_logit, \
+                real_LA_logit, real_LA_cam_logit, \
+                real_GB_logit, real_GB_cam_logit, \
+                real_LB_logit, real_LB_cam_logit, \
+                fake_GA_logit, fake_GA_cam_logit, \
+                fake_LA_logit, fake_LA_cam_logit, \
+                fake_GB_logit, fake_GB_cam_logit, \
+                fake_LB_logit, fake_LB_cam_logit
+        # update G
+        if update == 'G':
+            fake_A2B, fake_A2B_cam_logit, _ = self.genA2B(real_A)
+            fake_B2A, fake_B2A_cam_logit, _ = self.genB2A(real_B)
+
+            fake_A2B2A, _, _ = self.genB2A(fake_A2B)
+            fake_B2A2B, _, _ = self.genA2B(fake_B2A)
+
+            fake_A2A, fake_A2A_cam_logit, _ = self.genB2A(real_A)
+            fake_B2B, fake_B2B_cam_logit, _ = self.genA2B(real_B)
+
+            fake_GA_logit, fake_GA_cam_logit, _ = self.disGA(fake_B2A)
+            fake_LA_logit, fake_LA_cam_logit, _ = self.disLA(fake_B2A)
+            fake_GB_logit, fake_GB_cam_logit, _ = self.disGB(fake_A2B)
+            fake_LB_logit, fake_LB_cam_logit, _ = self.disLB(fake_A2B)
+
+            return fake_A2B_cam_logit, fake_B2A_cam_logit, \
+                fake_A2B2A, fake_B2A2B, \
+                fake_A2A, fake_A2A_cam_logit, \
+                fake_B2B, fake_B2B_cam_logit, \
+                fake_GA_logit, fake_GA_cam_logit, \
+                fake_LA_logit, fake_LA_cam_logit, \
+                fake_GB_logit, fake_GB_cam_logit, \
+                fake_LB_logit, fake_LB_cam_logit
+
 
 
 class UGATIT(object) :
@@ -171,67 +233,22 @@ class UGATIT(object) :
         """ Define Generator, Discriminator """
         low_rank = LOW_RANK
         self.genA2B = ResnetGenerator(input_nc=3, output_nc=3, ngf=self.ch, n_blocks=self.n_res, img_size=self.img_size, light=self.light).to(self.device)
-        self.genA2B = ddp_wrapper(self.genA2B)
-        genA2B_state = PowerSGDState(
-            process_group=dist.distributed_c10d.group.WORLD,
-            matrix_approximation_rank=low_rank,
-            use_error_feedback=True,
-            warm_start=False,
-            start_powerSGD_iter=2)
-        self.genA2B.register_comm_hook(genA2B_state, powerSGD_hook)
-
         self.genB2A = ResnetGenerator(input_nc=3, output_nc=3, ngf=self.ch, n_blocks=self.n_res, img_size=self.img_size, light=self.light).to(self.device)
-        self.genB2A = ddp_wrapper(self.genB2A)
-        genB2A_state = PowerSGDState(
-            process_group=dist.distributed_c10d.group.WORLD,
-            matrix_approximation_rank=low_rank,
-            use_error_feedback=True,
-            warm_start=False,
-            start_powerSGD_iter=2)
-        self.genB2A.register_comm_hook(genB2A_state, powerSGD_hook)
-        
-
         self.disGA = Discriminator(input_nc=3, ndf=self.ch, n_layers=7).to(self.device)
-        self.disGA = ddp_wrapper(self.disGA)
-        disGA_state = PowerSGDState(
-            process_group=dist.distributed_c10d.group.WORLD,
-            matrix_approximation_rank=low_rank,
-            use_error_feedback=True,
-            warm_start=False,
-            start_powerSGD_iter=2)
-        self.disGA.register_comm_hook(disGA_state, powerSGD_hook)
-
         self.disGB = Discriminator(input_nc=3, ndf=self.ch, n_layers=7).to(self.device)
-        self.disGB = ddp_wrapper(self.disGB)
-        disGB_state = PowerSGDState(
-            process_group=dist.distributed_c10d.group.WORLD,
-            matrix_approximation_rank=low_rank,
-            use_error_feedback=True,
-            warm_start=False,
-            start_powerSGD_iter=2)
-        self.disGB.register_comm_hook(disGB_state, powerSGD_hook)
-
         self.disLA = Discriminator(input_nc=3, ndf=self.ch, n_layers=5).to(self.device)
-        self.disLA = ddp_wrapper(self.disLA)
-        disLA_state = PowerSGDState(
-            process_group=dist.distributed_c10d.group.WORLD,
-            matrix_approximation_rank=low_rank,
-            use_error_feedback=True,
-            warm_start=False,
-            start_powerSGD_iter=2)
-        self.disLA.register_comm_hook(disLA_state, powerSGD_hook)
-
         self.disLB = Discriminator(input_nc=3, ndf=self.ch, n_layers=5).to(self.device)
-        self.disLB = ddp_wrapper(self.disLB)
-        disLB_state = PowerSGDState(
+
+        self.ugatit_model = UGATITModule(self.genA2B, self.genB2A, self.disGA, self.disGB, self.disLA, self.disLB)
+        self.ugatit_model = ddp_wrapper(self.ugatit_model)
+
+        powersgd_state = PowerSGDState(
             process_group=dist.distributed_c10d.group.WORLD,
             matrix_approximation_rank=low_rank,
             use_error_feedback=True,
             warm_start=False,
             start_powerSGD_iter=2)
-        self.disLB.register_comm_hook(disLB_state, powerSGD_hook)
-
-        self.models = [self.genA2B, self.genB2A, self.disGA, self.disGB, self.disLA, self.disLB]
+        self.ugatit_model.register_comm_hook(powersgd_state, powerSGD_hook)
 
 
 
@@ -254,19 +271,10 @@ class UGATIT(object) :
         self.Rho_clipper = RhoClipper(0, 1)
 
     def train(self):
-        self.genA2B.train(), self.genB2A.train(), self.disGA.train(), self.disGB.train(), self.disLA.train(), self.disLB.train()
+        # self.genA2B.train(), self.genB2A.train(), self.disGA.train(), self.disGB.train(), self.disLA.train(), self.disLB.train()
+        self.ugatit_model.train()
 
         start_iter = 1
-        if self.resume:
-            model_list = glob(os.path.join(self.result_dir, self.dataset, 'model', '*.pt'))
-            if not len(model_list) == 0:
-                model_list.sort()
-                start_iter = int(model_list[-1].split('_')[-1].split('.')[0])
-                self.load(os.path.join(self.result_dir, self.dataset, 'model'), start_iter)
-                print(" [*] Load SUCCESS")
-                if self.decay_flag and start_iter > (self.iteration // 2):
-                    self.G_optim.param_groups[0]['lr'] -= (self.lr / (self.iteration // 2)) * (start_iter - self.iteration // 2)
-                    self.D_optim.param_groups[0]['lr'] -= (self.lr / (self.iteration // 2)) * (start_iter - self.iteration // 2)
 
         # training loop
         print('training start !')
@@ -294,18 +302,26 @@ class UGATIT(object) :
             # Update D
             self.D_optim.zero_grad()
 
-            fake_A2B, _, _ = self.genA2B(real_A)
-            fake_B2A, _, _ = self.genB2A(real_B)
+            real_GA_logit, real_GA_cam_logit, \
+                real_LA_logit, real_LA_cam_logit, \
+                real_GB_logit, real_GB_cam_logit, \
+                real_LB_logit, real_LB_cam_logit, \
+                fake_GA_logit, fake_GA_cam_logit, \
+                fake_LA_logit, fake_LA_cam_logit, \
+                fake_GB_logit, fake_GB_cam_logit, \
+                fake_LB_logit, fake_LB_cam_logit = self.ugatit_model(real_A, real_B, 'D')
+            # fake_A2B, _, _ = self.genA2B(real_A)
+            # fake_B2A, _, _ = self.genB2A(real_B)
 
-            real_GA_logit, real_GA_cam_logit, _ = self.disGA(real_A)
-            real_LA_logit, real_LA_cam_logit, _ = self.disLA(real_A)
-            real_GB_logit, real_GB_cam_logit, _ = self.disGB(real_B)
-            real_LB_logit, real_LB_cam_logit, _ = self.disLB(real_B)
+            # real_GA_logit, real_GA_cam_logit, _ = self.disGA(real_A)
+            # real_LA_logit, real_LA_cam_logit, _ = self.disLA(real_A)
+            # real_GB_logit, real_GB_cam_logit, _ = self.disGB(real_B)
+            # real_LB_logit, real_LB_cam_logit, _ = self.disLB(real_B)
 
-            fake_GA_logit, fake_GA_cam_logit, _ = self.disGA(fake_B2A)
-            fake_LA_logit, fake_LA_cam_logit, _ = self.disLA(fake_B2A)
-            fake_GB_logit, fake_GB_cam_logit, _ = self.disGB(fake_A2B)
-            fake_LB_logit, fake_LB_cam_logit, _ = self.disLB(fake_A2B)
+            # fake_GA_logit, fake_GA_cam_logit, _ = self.disGA(fake_B2A)
+            # fake_LA_logit, fake_LA_cam_logit, _ = self.disLA(fake_B2A)
+            # fake_GB_logit, fake_GB_cam_logit, _ = self.disGB(fake_A2B)
+            # fake_LB_logit, fake_LB_cam_logit, _ = self.disLB(fake_A2B)
 
             D_ad_loss_GA = self.MSE_loss(real_GA_logit, torch.ones_like(real_GA_logit).to(self.device)) + self.MSE_loss(fake_GA_logit, torch.zeros_like(fake_GA_logit).to(self.device))
             D_ad_cam_loss_GA = self.MSE_loss(real_GA_cam_logit, torch.ones_like(real_GA_cam_logit).to(self.device)) + self.MSE_loss(fake_GA_cam_logit, torch.zeros_like(fake_GA_cam_logit).to(self.device))
@@ -326,19 +342,28 @@ class UGATIT(object) :
             # Update G
             self.G_optim.zero_grad()
 
-            fake_A2B, fake_A2B_cam_logit, _ = self.genA2B(real_A)
-            fake_B2A, fake_B2A_cam_logit, _ = self.genB2A(real_B)
+            # fake_A2B, fake_A2B_cam_logit, _ = self.genA2B(real_A)
+            # fake_B2A, fake_B2A_cam_logit, _ = self.genB2A(real_B)
 
-            fake_A2B2A, _, _ = self.genB2A(fake_A2B)
-            fake_B2A2B, _, _ = self.genA2B(fake_B2A)
+            # fake_A2B2A, _, _ = self.genB2A(fake_A2B)
+            # fake_B2A2B, _, _ = self.genA2B(fake_B2A)
 
-            fake_A2A, fake_A2A_cam_logit, _ = self.genB2A(real_A)
-            fake_B2B, fake_B2B_cam_logit, _ = self.genA2B(real_B)
+            # fake_A2A, fake_A2A_cam_logit, _ = self.genB2A(real_A)
+            # fake_B2B, fake_B2B_cam_logit, _ = self.genA2B(real_B)
 
-            fake_GA_logit, fake_GA_cam_logit, _ = self.disGA(fake_B2A)
-            fake_LA_logit, fake_LA_cam_logit, _ = self.disLA(fake_B2A)
-            fake_GB_logit, fake_GB_cam_logit, _ = self.disGB(fake_A2B)
-            fake_LB_logit, fake_LB_cam_logit, _ = self.disLB(fake_A2B)
+            # fake_GA_logit, fake_GA_cam_logit, _ = self.disGA(fake_B2A)
+            # fake_LA_logit, fake_LA_cam_logit, _ = self.disLA(fake_B2A)
+            # fake_GB_logit, fake_GB_cam_logit, _ = self.disGB(fake_A2B)
+            # fake_LB_logit, fake_LB_cam_logit, _ = self.disLB(fake_A2B)
+
+            fake_A2B_cam_logit, fake_B2A_cam_logit, \
+            fake_A2B2A, fake_B2A2B, \
+            fake_A2A, fake_A2A_cam_logit, \
+            fake_B2B, fake_B2B_cam_logit, \
+            fake_GA_logit, fake_GA_cam_logit, \
+            fake_LA_logit, fake_LA_cam_logit, \
+            fake_GB_logit, fake_GB_cam_logit, \
+            fake_LB_logit, fake_LB_cam_logit = self.ugatit_model(real_A, real_B, 'G')
 
             G_ad_loss_GA = self.MSE_loss(fake_GA_logit, torch.ones_like(fake_GA_logit).to(self.device))
             G_ad_cam_loss_GA = self.MSE_loss(fake_GA_cam_logit, torch.ones_like(fake_GA_cam_logit).to(self.device))
@@ -376,113 +401,6 @@ class UGATIT(object) :
                             this_time - start_time, speed, Discriminator_loss, Generator_loss))
                 # last_time = this_time
                 last_time = time.time()
-            
-            if step % self.print_freq == 0:
-                train_sample_num = 5
-                test_sample_num = 5
-                A2B = np.zeros((self.img_size * 7, 0, 3))
-                B2A = np.zeros((self.img_size * 7, 0, 3))
-
-                self.genA2B.eval(), self.genB2A.eval(), self.disGA.eval(), self.disGB.eval(), self.disLA.eval(), self.disLB.eval()
-                for _ in range(train_sample_num):
-                    try:
-                        real_A, _ = trainA_iter.next()
-                    except:
-                        trainA_iter = iter(self.trainA_loader)
-                        real_A, _ = trainA_iter.next()
-
-                    try:
-                        real_B, _ = trainB_iter.next()
-                    except:
-                        trainB_iter = iter(self.trainB_loader)
-                        real_B, _ = trainB_iter.next()
-                    real_A, real_B = real_A.to(self.device), real_B.to(self.device)
-
-                    fake_A2B, _, fake_A2B_heatmap = self.genA2B(real_A)
-                    fake_B2A, _, fake_B2A_heatmap = self.genB2A(real_B)
-
-                    fake_A2B2A, _, fake_A2B2A_heatmap = self.genB2A(fake_A2B)
-                    fake_B2A2B, _, fake_B2A2B_heatmap = self.genA2B(fake_B2A)
-
-                    fake_A2A, _, fake_A2A_heatmap = self.genB2A(real_A)
-                    fake_B2B, _, fake_B2B_heatmap = self.genA2B(real_B)
-
-                    A2B = np.concatenate((A2B, np.concatenate((RGB2BGR(tensor2numpy(denorm(real_A[0]))),
-                                                               cam(tensor2numpy(fake_A2A_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_A2A[0]))),
-                                                               cam(tensor2numpy(fake_A2B_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_A2B[0]))),
-                                                               cam(tensor2numpy(fake_A2B2A_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_A2B2A[0])))), 0)), 1)
-
-                    B2A = np.concatenate((B2A, np.concatenate((RGB2BGR(tensor2numpy(denorm(real_B[0]))),
-                                                               cam(tensor2numpy(fake_B2B_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_B2B[0]))),
-                                                               cam(tensor2numpy(fake_B2A_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_B2A[0]))),
-                                                               cam(tensor2numpy(fake_B2A2B_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_B2A2B[0])))), 0)), 1)
-
-                for _ in range(test_sample_num):
-                    try:
-                        real_A, _ = testA_iter.next()
-                    except:
-                        testA_iter = iter(self.testA_loader)
-                        real_A, _ = testA_iter.next()
-
-                    try:
-                        real_B, _ = testB_iter.next()
-                    except:
-                        testB_iter = iter(self.testB_loader)
-                        real_B, _ = testB_iter.next()
-                    real_A, real_B = real_A.to(self.device), real_B.to(self.device)
-
-                    fake_A2B, _, fake_A2B_heatmap = self.genA2B(real_A)
-                    fake_B2A, _, fake_B2A_heatmap = self.genB2A(real_B)
-
-                    fake_A2B2A, _, fake_A2B2A_heatmap = self.genB2A(fake_A2B)
-                    fake_B2A2B, _, fake_B2A2B_heatmap = self.genA2B(fake_B2A)
-
-                    fake_A2A, _, fake_A2A_heatmap = self.genB2A(real_A)
-                    fake_B2B, _, fake_B2B_heatmap = self.genA2B(real_B)
-
-                    A2B = np.concatenate((A2B, np.concatenate((RGB2BGR(tensor2numpy(denorm(real_A[0]))),
-                                                               cam(tensor2numpy(fake_A2A_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_A2A[0]))),
-                                                               cam(tensor2numpy(fake_A2B_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_A2B[0]))),
-                                                               cam(tensor2numpy(fake_A2B2A_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_A2B2A[0])))), 0)), 1)
-
-                    B2A = np.concatenate((B2A, np.concatenate((RGB2BGR(tensor2numpy(denorm(real_B[0]))),
-                                                               cam(tensor2numpy(fake_B2B_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_B2B[0]))),
-                                                               cam(tensor2numpy(fake_B2A_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_B2A[0]))),
-                                                               cam(tensor2numpy(fake_B2A2B_heatmap[0]), self.img_size),
-                                                               RGB2BGR(tensor2numpy(denorm(fake_B2A2B[0])))), 0)), 1)
-
-                if rank == 0:
-                    cv2.imwrite(os.path.join(self.result_dir, self.dataset, 'img', 'A2B_%07d.png' % step), A2B * 255.0)
-                    cv2.imwrite(os.path.join(self.result_dir, self.dataset, 'img', 'B2A_%07d.png' % step), B2A * 255.0)
-                    
-                self.genA2B.train(), self.genB2A.train(), self.disGA.train(), self.disGB.train(), self.disLA.train(), self.disLB.train()
-
-            if (step % self.save_freq == 0) and (rank == 0):
-                self.save(os.path.join(self.result_dir, self.dataset, 'model'), step)
-
-            if (step % 1000 == 0) and (rank == 0):
-                params = {}
-                params['genA2B'] = self.genA2B.state_dict()
-                params['genB2A'] = self.genB2A.state_dict()
-                params['disGA'] = self.disGA.state_dict()
-                params['disGB'] = self.disGB.state_dict()
-                params['disLA'] = self.disLA.state_dict()
-                params['disLB'] = self.disLB.state_dict()
-                torch.save(params, os.path.join(self.result_dir, self.dataset + '_params_latest.pt'))
-
-        if( rank == 0 ):
-            self.save(os.path.join(self.result_dir, self.dataset, 'model'), step)
 
     def save(self, dir, step):
         if rank != 0:
