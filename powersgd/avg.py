@@ -10,6 +10,8 @@ while True:
             continue
         start_index = line.find("Speed:")
         end_index = line.find("samples/sec")
+        if start_index == -1 or end_index == -1:
+            continue
         line = line[start_index + 7: end_index - 1]
         speeds.append(float(line))
     except:

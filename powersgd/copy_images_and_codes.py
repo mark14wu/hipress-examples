@@ -2,7 +2,6 @@ import os
 
 
 gpus = [18, 17, 16, 15, 14, 13, 11, 10, 9, 7, 2]
-# gpus = [11]
 
 for gpu_id in gpus:
     copy_id_command = "ssh-copy-id 192.168.1.%d" % (40 + gpu_id)
@@ -20,7 +19,6 @@ for gpu_id in gpus:
     copy_torchddp_lstm = "scp ./torchddp/torchddp_lstm.py 192.168.1.%d:~/sparse_adam/torchddp_lstm.py" % (40 + gpu_id)
     copy_torchddp_ugatit = "scp -r ./torchddp/torchddp_ugatit 192.168.1.%d:~/sparse_adam/" % (40 + gpu_id)
 
-    os.system(copy_hipress_pytorch_ugatit)
     os.system(copy_torchddp_ugatit)
 
     
