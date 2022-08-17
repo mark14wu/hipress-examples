@@ -145,6 +145,8 @@ class UGATIT(object) :
         self.fix_aug = args.fix_aug
         self.list_mode = args.list_mode
 
+        self.powersgd = args.powersgd
+
         if torch.backends.cudnn.enabled and self.benchmark_flag:
             print('set benchmark !')
             torch.backends.cudnn.benchmark = True
@@ -248,7 +250,8 @@ class UGATIT(object) :
             use_error_feedback=True,
             warm_start=False,
             start_powerSGD_iter=2)
-        self.ugatit_model.register_comm_hook(powersgd_state, powerSGD_hook)
+        if self.powersgd:
+            self.ugatit_model.register_comm_hook(powersgd_state, powerSGD_hook)
 
 
 

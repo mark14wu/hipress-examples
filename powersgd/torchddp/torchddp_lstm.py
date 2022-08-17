@@ -128,6 +128,7 @@ parser.add_argument('--clip', type=float, default=0)
 parser.add_argument('--dropout', type=float, default=0.65)
 parser.add_argument('--log-interval', type=int, default=20)
 parser.add_argument('--num-iterations', type=int, default=200)
+parser.add_argument('--powersgd', type=int, default=0)
 
 args = parser.parse_args()
 
@@ -157,7 +158,8 @@ state = PowerSGDState(
     use_error_feedback=True,
     warm_start=False,
     start_powerSGD_iter=10)
-model.register_comm_hook(state, powerSGD_hook)
+if args.powersgd:
+    model.register_comm_hook(state, powerSGD_hook)
 
 loss_fn = nn.NLLLoss()
 
