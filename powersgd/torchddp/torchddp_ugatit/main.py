@@ -44,6 +44,7 @@ def parse_args():
     parser.add_argument('--resume', type=str2bool, default=False)
     parser.add_argument('--fix_aug', type=str2bool, default=False, help='No resize and random crop when train')
     parser.add_argument('--list_mode', type=str2bool, default=False, help='load image list')
+    parser.add_argument('--powersgd', type=int, default=0, help='enable powersgd or not')
 
     return check_args(parser.parse_args())
 
