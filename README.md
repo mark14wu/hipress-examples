@@ -19,21 +19,42 @@
    2. git submodule init deps/torch-hipress-extension src/CCO && git submodule update
    3. cd src/CCO
    4. git submodule init && git submodule update
-
-
-export HOROVOD_WITH_NCCL=1 HOROVOD_NCCL_HOME=/usr/local/nccl/
-6. 编译hipress-torch扩展
+6. 编译hipress-torch扩展(可选)
    1. cd hipress/deps/torch-hipress-extension
+   2. export HOROVOD_WITH_NCCL=1 HOROVOD_NCCL_HOME=/usr/local/nccl/
+   3. bash install.sh
+7. 编译hipress-mxnet扩展(可选)
+   1. apt install libopenblas-dev, libopencv-dev
+   2. pip install numpy==1.20.3
+   3. cd deps/mxnet-1.9.0
+   4. mkdir build
+   5. cd build
+   6. cmake ..
+   7. make -j
+   8. cd ../python
+   9. pip install -e .
+   10. 修改hipress/src/CaSync/install.sh，设置export HOROVOD_WITH_MXNET=1，去除export HOROVOD_WITHOUT_MXNET=1（如果存在）
+8. 编译hipress本体
+   1. cd hipress/src/CaSync
    2. bash install.sh
-7. 编译hipress本体
-   1. cd hipress/src/CCO
-   2. bash install.sh
-8. 到hipress/src/CCO以外路径，python -c "import horovod.torch"，若无输出说明安装成功
-9. 开始测试吧！
+9. 到hipress/src/CaSync以外路径，python -c "import horovod.torch"，若无输出说明安装成功
+10. 开始测试吧！
 
 # 附录0-测试脚本仓库
 
 https://github.com/mark14wu/hipress-examples
+
+## hipress mxnet脚本
+
+位于hipress-example/powersgd/hipress_mxnet文件夹
+
+### VGG
+
+安装依赖：pip install gluoncv, gluoncv2
+
+模型代码：hipness-example/powersgd/hipress_mxnet/hipress_mxnet.py
+
+1-8机脚本：hipness-example/powersgd/hipress_mxnet/10Gbps_VGG/
 
 ## hipress pytorch脚本
 
