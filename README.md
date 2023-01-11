@@ -9,7 +9,7 @@
    1. apt update
    2. apt install python3 python3-pip cmake openmpi-bin
       1. 上述安装过程中选择时区，需要分别输入6和70
-   3. pip install scipy opencv-python
+   3. pip install numpy==1.20.3 scipy opencv-python
    4. apt install python3-opencv -y
 3. ln -s /usr/bin/python3 /usr/bin/python
 4. 安装horovod依赖：
@@ -23,17 +23,17 @@
    1. cd hipress/deps/torch-hipress-extension
    2. export HOROVOD_WITH_NCCL=1 HOROVOD_NCCL_HOME=/usr/local/nccl/
    3. bash install.sh
+   4. 修改hipress/src/CaSync/install.sh，设置export HOROVOD_WITH_PYTORCH=1，去除export HOROVOD_WITHOUT_PYTORCH=1（如果存在）
 7. 编译hipress-mxnet扩展(可选)
-   1. apt install libopenblas-dev, libopencv-dev
-   2. pip install numpy==1.20.3
-   3. cd deps/mxnet-1.9.0
-   4. mkdir build
-   5. cd build
-   6. cmake ..
-   7. make -j
-   8. cd ../python
-   9. pip install -e .
-   10. 修改hipress/src/CaSync/install.sh，设置export HOROVOD_WITH_MXNET=1，去除export HOROVOD_WITHOUT_MXNET=1（如果存在）
+   1. apt install libopenblas-dev libopencv-dev
+   2. cd deps/mxnet-1.9.0
+   3. mkdir build
+   4. cd build
+   5. cmake ..
+   6. make -j
+   7. cd ../python
+   8. pip install -e .
+   9. 修改hipress/src/CaSync/install.sh，设置export HOROVOD_WITH_MXNET=1，去除export HOROVOD_WITHOUT_MXNET=1（如果存在）
 8. 编译hipress本体
    1. cd hipress/src/CaSync
    2. bash install.sh
@@ -50,7 +50,7 @@ https://github.com/mark14wu/hipress-examples
 
 ### VGG
 
-安装依赖：pip install gluoncv, gluoncv2
+安装依赖：pip install gluoncv gluoncv2
 
 模型代码：hipness-example/powersgd/hipress_mxnet/hipress_mxnet.py
 
